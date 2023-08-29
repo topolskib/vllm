@@ -34,7 +34,7 @@ from transformers import LlamaConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
+from vllm.model_executor.layers.attention import PagedAttentionWithRoPE, PageAttentionWithRoPELinearScaling
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.weight_utils import (hf_model_weights_iterator,
                                               load_tensor_parallel_weights)
@@ -86,6 +86,7 @@ class LlamaAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, float]] = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -101,6 +102,7 @@ class LlamaAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
+        self.rope_scaling = rope_scaling
 
         self.qkv_proj = ColumnParallelLinear(
             hidden_size,
@@ -117,12 +119,30 @@ class LlamaAttention(nn.Module):
             input_is_parallel=True,
             perform_initialization=False,
         )
-        self.attn = PagedAttentionWithRoPE(self.num_heads,
-                                           self.head_dim,
-                                           self.scaling,
-                                           base=self.rope_theta,
-                                           rotary_dim=self.head_dim,
-                                           num_kv_heads=self.num_kv_heads)
+        if self.rope_scaling is None:
+          self.attn = PagedAttentionWithRoPE(
+              self.num_heads,
+              self.head_dim,
+              self.scaling,
+              base=self.rope_theta,
+              rotary_dim=self.head_dim,
+              num_kv_heads=self.num_kv_heads
+          )
+        else:
+          scaling_type = self.rope_scaling["type"]
+          scaling_factor = self.rope_scaling["factor"]
+          if scaling_type == "linear":
+              self.attn = PageAttentionWithRoPELinearScaling(
+                  self.num_heads,
+                  self.head_dim,
+                  self.scaling,
+                  base=self.rope_theta,
+                  rotary_dim=self.head_dim,
+                  num_kv_heads=self.num_kv_heads,
+                  scaling_factor=scaling_factor
+              )
+          else:
+              raise ValueError(f"Unsupported scaling type: {scaling_type}")
 
     def forward(
         self,
@@ -148,11 +168,13 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
+        rope_scaling = getattr(config, "rope_scaling", None)
         self.self_attn = LlamaAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,

@@ -258,21 +258,23 @@ class PagedAttentionWithRoPE(PagedAttention):
     ) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads)
 
-        # Create the cos and sin cache.
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2) / rotary_dim))
-        t = torch.arange(max_position).float()
-        freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
-        cos = freqs.cos()
-        sin = freqs.sin()
-        cache = torch.cat((cos, sin), dim=-1)
+        self.set_cos_sin_cache(base, max_position, rotary_dim)
 
-        # FIXME(woosuk): This assumes that we configure the default dtype when
-        # initializing the model.
-        # TODO(woosuk): Make it more robust.
-        torch_dtype = torch.get_default_dtype()
-        cache = cache.to(torch_dtype)
-        # Embedding size: [max_position, rotary_dim]
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+    def set_cos_sin_cache(self, base, max_position, rotary_dim):
+      # Create the cos and sin cache.
+      inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2) / rotary_dim))
+      t = torch.arange(max_position).float()
+      freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
+      cos = freqs.cos()
+      sin = freqs.sin()
+      cache = torch.cat((cos, sin), dim=-1)
+      # FIXME(woosuk): This assumes that we configure the default dtype when
+      # initializing the model.
+      # TODO(woosuk): Make it more robust.
+      torch_dtype = torch.get_default_dtype()
+      cache = cache.to(torch_dtype)
+      # Embedding size: [max_position, rotary_dim]
+      self.register_buffer("cos_sin_cache", cache, persistent=False)
 
     def forward(
         self,
@@ -321,6 +323,39 @@ class PagedAttentionWithRoPE(PagedAttention):
             input_metadata,
             cache_event,
         )
+
+class PageAttentionWithRoPELinearScaling(PagedAttentionWithRoPE):
+    """PagedAttentionWithRoPE with linear scaling"""
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        rotary_dim: int,
+        max_position: int = 8192,
+        base: int = 10000,
+        scaling_factor: float = 1.0,
+        num_kv_heads: Optional[int] = None,
+    ) -> None:
+        self.scaling_factor = scaling_factor
+        super().__init__(num_heads, head_size, scale, rotary_dim, max_position, base, num_kv_heads)
+
+    def set_cos_sin_cache(self, base, max_position, rotary_dim):
+        # Create the cos and sin cache.
+        inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2) / rotary_dim))
+        t = torch.arange(max_position).float() / self.scaling_factor
+        freqs = torch.einsum("i,j -> ij", t, inv_freq.float())
+        cos = freqs.cos()
+        sin = freqs.sin()
+        cache = torch.cat((cos, sin), dim=-1)
+        # FIXME(woosuk): This assumes that we configure the default dtype when
+        # initializing the model.
+        # TODO(woosuk): Make it more robust.
+        torch_dtype = torch.get_default_dtype()
+        cache = cache.to(torch_dtype)
+        # Embedding size: [max_position, rotary_dim]
+        self.register_buffer("cos_sin_cache", cache, persistent=False)
+
 
 
 class PagedAttentionWithALiBi(PagedAttention):
