@@ -1,6 +1,8 @@
 import argparse
 import json
 from typing import AsyncGenerator
+import torch
+import gc
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -10,11 +12,37 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
+from vllm.model_executor.parallel_utils.parallel_state import destroy_model_parallel
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
 TIMEOUT_TO_PREVENT_DEADLOCK = 1  # seconds.
 app = FastAPI()
 engine = None
+
+@app.post("/change_model")
+async def change_model(request: Request) -> Response:
+    request_dict = await request.json()
+    new_path = request_dict.pop("model_path")
+ 
+    global engine_args
+    current_path = engine_args.model
+    if current_path == new_path:
+        return Response(status_code=200)
+    
+    try:
+        global engine
+        del engine        
+        gc.collect()
+        torch.cuda.empty_cache()
+        destroy_model_parallel()
+
+        engine_args.model = new_path
+        engine_args.tokenizer = new_path
+        engine = AsyncLLMEngine.from_engine_args(engine_args)
+        return Response(status_code=200)
+    except Exception as e:
+        return JSONResponse(status_code=404, content={"message": str(e)})
+        
 
 
 @app.post("/generate")
