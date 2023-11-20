@@ -3,6 +3,7 @@ import json
 from typing import AsyncGenerator
 import torch
 import gc
+import ray
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -30,6 +31,7 @@ async def change_model(request: Request) -> Response:
         return Response(status_code=200)
     
     try:
+        ray.shutdown()
         global engine
         del engine        
         gc.collect()
